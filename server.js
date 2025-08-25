@@ -1,14 +1,10 @@
-// Proxy CORS minimal + sicuro (Node 18+)
 import express from "express";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Consenti solo questi host di destinazione (evita open-proxy)
-const ALLOWLIST = (process.env.ALLOWLIST_HOSTS || "script.google.com").split(",").map(s => s.trim());
-
-// Accetta body “grezzi” di dimensione ampia (puoi aumentare se necessario)
-app.use(express.raw({ type: "*/*", limit: process.env.BODY_LIMIT || "15mb" }));
+// Body grande: invieremo foto in base64
+app.use(express.raw({ type: "*/*", limit: process.env.BODY_LIMIT || "25mb" }));
 
 // Preflight CORS
 app.options("*", (req, res) => {
@@ -17,8 +13,12 @@ app.options("*", (req, res) => {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "*",
   });
-  return res.sendStatus(204);
+  res.sendStatus(204);
 });
+
+const ALLOW = (process.env.ALLOWLIST_HOSTS ||
+  "script.google.com,script.googleusercontent.com"
+).split(",").map(s => s.trim());
 
 app.all("/", async (req, res) => {
   try {
@@ -29,42 +29,38 @@ app.all("/", async (req, res) => {
     if (!["http:", "https:"].includes(url.protocol)) {
       return res.status(400).send("Invalid protocol");
     }
-    if (!ALLOWLIST.includes(url.hostname)) {
+    if (!ALLOW.includes(url.hostname)) {
+      console.log("Blocked host:", url.hostname, "ALLOW:", ALLOW);
       return res.status(403).send("Target host not allowed");
     }
 
-    // Copia/filtra header in uscita
+    // copia header in uscita (no origin/referer/host)
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
-      if (!v) continue;
       const key = k.toLowerCase();
-      // rimuovi hop-by-hop/origin
       if (["host","origin","referer","connection","accept-encoding","content-length"].includes(key)) continue;
-      headers.set(key, Array.isArray(v) ? v.join(", ") : v);
+      if (v) headers.set(key, Array.isArray(v) ? v.join(", ") : v);
     }
 
-    const init = {
+    const resp = await fetch(target, {
       method: req.method,
       headers,
       body: (req.method === "GET" || req.method === "HEAD") ? undefined : req.body
-    };
+    });
 
-    const resp = await fetch(target, init);
-    const buf = Buffer.from(await resp.arrayBuffer());
-
-    // Copia content-type se presente
-    const outHeaders = {
+    const buf = await resp.arrayBuffer();
+    const h = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Headers": "*",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
     };
-    const ct = resp.headers.get("content-type");
-    if (ct) outHeaders["Content-Type"] = ct;
+    const ct = resp.headers.get("content-type"); if (ct) h["Content-Type"] = ct;
 
-    res.status(resp.status).set(outHeaders).send(buf);
-  } catch (err) {
-    res.status(500).send(String(err));
+    res.status(resp.status).set(h).send(Buffer.from(buf));
+  } catch (e) {
+    console.error(e);
+    res.status(500).send(String(e));
   }
 });
 
-app.listen(PORT, () => console.log(`CORS proxy on :${PORT}`));
+app.listen(PORT, () => console.log("CORS proxy up on :" + PORT));
